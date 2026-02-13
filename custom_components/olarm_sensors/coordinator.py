@@ -80,6 +80,9 @@ class OlarmCoordinator(DataUpdateCoordinator):
 
     async def update_data(self):
         """Call to update the data for the integration from Olarm's API."""
+        # Reset the rate limiter's consecutive 429 counter at the start of each cycle
+        self.api._rate_limiter.reset_cycle()
+
         # Getting the update data.
         try:
             self.release_data = await self.update_api.get_version()

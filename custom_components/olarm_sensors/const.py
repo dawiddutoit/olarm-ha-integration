@@ -6,6 +6,13 @@ from homeassistant.components.alarm_control_panel import AlarmControlPanelState
 
 VERSION = "2.3.3"
 
+# Rate limit configuration
+MIN_SCAN_INTERVAL = 60  # Minimum seconds between update cycles (Olarm API rate limits aggressively)
+API_MIN_REQUEST_GAP = 2.0  # Minimum seconds between individual API requests
+API_BACKOFF_BASE = 60  # Base seconds to wait after a 429 response
+API_BACKOFF_MAX = 300  # Maximum backoff in seconds (5 minutes)
+API_MAX_CONSECUTIVE_429 = 3  # After this many consecutive 429s, stop retrying until next cycle
+
 LOGGER = logging.getLogger(__package__)
 
 DOMAIN = "olarm_sensors"

@@ -24,6 +24,7 @@ from .const import (
     CONF_OLARM_DEVICES,
     DOMAIN,
     LOGGER,
+    MIN_SCAN_INTERVAL,
     OLARM_DEVICE_AMOUNT,
     OLARM_DEVICE_NAMES,
     OLARM_DEVICES,
@@ -58,8 +59,8 @@ class OlarmSensorsConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if not user_input[CONF_SCAN_INTERVAL]:
             errors[CONF_SCAN_INTERVAL] = "Scan interval is required."
-        elif user_input[CONF_SCAN_INTERVAL] < 8:
-            errors[CONF_SCAN_INTERVAL] = "Scan interval must be at least 8 seconds."
+        elif user_input[CONF_SCAN_INTERVAL] < MIN_SCAN_INTERVAL:
+            errors[CONF_SCAN_INTERVAL] = f"Scan interval must be at least {MIN_SCAN_INTERVAL} seconds. The Olarm API rate limits aggressively."
 
         api_key = user_input[CONF_API_KEY]
         scan_interval = user_input[CONF_SCAN_INTERVAL]
@@ -169,7 +170,7 @@ class OlarmSensorsConfigFlow(ConfigFlow, domain=DOMAIN):
         return vol.Schema(
             {
                 vol.Required(CONF_API_KEY): cv.string,
-                vol.Required(CONF_SCAN_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=8)),
+                vol.Required(CONF_SCAN_INTERVAL, default=MIN_SCAN_INTERVAL): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
                 vol.Optional(CONF_ALARM_CODE, default="1234567890"): cv.string,
             }
         )
@@ -206,7 +207,7 @@ class OlarmOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_SCAN_INTERVAL,
                     default=int(self.config_entry.data[CONF_SCAN_INTERVAL])
-                ): vol.All(vol.Coerce(int), vol.Range(min=8)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=MIN_SCAN_INTERVAL)),
                 vol.Optional(CONF_ALARM_CODE, default=alarm_code): cv.string,
                 vol.Optional(CONF_OLARM_DEVICES): cv.multi_select(self.config_entry.data[OLARM_DEVICE_NAMES]),
             }

@@ -7,10 +7,17 @@ from typing import Any
 import aiohttp
 from aiohttp.client_exceptions import ContentTypeError
 
-from homeassistant.const import CONF_SCAN_INTERVAL
 from homeassistant.core import ServiceCall
 
-from .const import GITHUB_TOKEN, LOGGER, VERSION
+from .const import (
+    API_BACKOFF_BASE,
+    API_BACKOFF_MAX,
+    API_MAX_CONSECUTIVE_429,
+    API_MIN_REQUEST_GAP,
+    GITHUB_TOKEN,
+    LOGGER,
+    VERSION,
+)
 from .exceptions import (
     APIClientConnectorError,
     APIContentTypeError,
@@ -20,6 +27,91 @@ from .exceptions import (
 )
 
 
+class OlarmRateLimiter:
+    """Global rate limiter for Olarm API requests.
+
+    Enforces a minimum gap between requests and implements exponential backoff
+    when 429 (Too Many Requests) responses are received.
+    """
+
+    def __init__(self, min_gap: float = API_MIN_REQUEST_GAP) -> None:
+        """Initialize rate limiter.
+
+        Args:
+            min_gap: Minimum seconds between API requests.
+        """
+        self._min_gap = min_gap
+        self._last_request_time: float = 0.0
+        self._backoff_until: float = 0.0
+        self._consecutive_429s: int = 0
+
+    @property
+    def is_backed_off(self) -> bool:
+        """Check if we're currently in a backoff period."""
+        return time.monotonic() < self._backoff_until
+
+    @property
+    def backoff_remaining(self) -> float:
+        """Seconds remaining in backoff period."""
+        remaining = self._backoff_until - time.monotonic()
+        return max(0.0, remaining)
+
+    async def wait_for_slot(self) -> bool:
+        """Wait until we're allowed to make a request.
+
+        Returns:
+            True if the request can proceed, False if we should skip (too many 429s).
+        """
+        # Check if we've hit too many consecutive 429s
+        if self._consecutive_429s >= API_MAX_CONSECUTIVE_429:
+            LOGGER.warning(
+                "Olarm API: %d consecutive 429 responses. Skipping requests until next update cycle.",
+                self._consecutive_429s,
+            )
+            return False
+
+        # Wait out any backoff period
+        if self.is_backed_off:
+            wait_time = self.backoff_remaining
+            LOGGER.info(
+                "Olarm API: Rate limited, waiting %.1f seconds before next request",
+                wait_time,
+            )
+            await asyncio.sleep(wait_time)
+
+        # Enforce minimum gap between requests
+        now = time.monotonic()
+        elapsed = now - self._last_request_time
+        if elapsed < self._min_gap:
+            gap_wait = self._min_gap - elapsed
+            await asyncio.sleep(gap_wait)
+
+        self._last_request_time = time.monotonic()
+        return True
+
+    def record_success(self) -> None:
+        """Record a successful API response — resets consecutive 429 counter."""
+        self._consecutive_429s = 0
+
+    def record_rate_limit(self) -> None:
+        """Record a 429 response — applies exponential backoff."""
+        self._consecutive_429s += 1
+        backoff_seconds = min(
+            API_BACKOFF_BASE * (2 ** (self._consecutive_429s - 1)),
+            API_BACKOFF_MAX,
+        )
+        self._backoff_until = time.monotonic() + backoff_seconds
+        LOGGER.warning(
+            "Olarm API: Rate limited (429). Consecutive: %d. Backing off for %d seconds.",
+            self._consecutive_429s,
+            backoff_seconds,
+        )
+
+    def reset_cycle(self) -> None:
+        """Reset the consecutive 429 counter at the start of a new update cycle."""
+        self._consecutive_429s = 0
+
+
 class OlarmApi:
     """Provides an interface to the Olarm API. It handles authentication, and provides methods for making requests to arm, disarm, sleep, or stay a security zone.
 
@@ -27,6 +119,9 @@ class OlarmApi:
         ``device_id (str): UUID for the Olarm device.``n
         ``api_key (str): The key can be passed in an authorization header to authenticate to Olarm.
     """
+
+    # Shared rate limiter across all OlarmApi instances (one per API key)
+    _rate_limiters: dict[str, OlarmRateLimiter] = {}
 
     def __init__(
         self,
@@ -54,19 +149,38 @@ class OlarmApi:
             "User-Agent": "Home Assistant",
         }
 
+        # Use a shared rate limiter per API key so multiple devices don't exceed limits
+        if api_key not in OlarmApi._rate_limiters:
+            OlarmApi._rate_limiters[api_key] = OlarmRateLimiter()
+        self._rate_limiter = OlarmApi._rate_limiters[api_key]
+
     async def get_device_json(self) -> dict:
         """Get and return the data from the Olarm API for a specific device.
 
         return: dict The info associated with a device
         """
+        if not await self._rate_limiter.wait_for_slot():
+            return {"error": "Rate limited — too many consecutive 429 responses"}
+
         try:
             async with aiohttp.ClientSession() as session, session.get(
                 f"https://apiv4.olarm.co/api/v4/devices/{self.device_id}",
                 headers=self.headers,
             ) as response:
+                if response.status == 429:
+                    text = await response.text()
+                    self._rate_limiter.record_rate_limit()
+                    LOGGER.error(
+                        "Olarm API rate limited (429) for device (%s). Backing off. %s",
+                        self.device_name,
+                        text,
+                    )
+                    return {"error": text}
+
                 try:
                     resp = await response.json()
                     resp["error"] = None
+                    self._rate_limiter.record_success()
                     return resp
 
                 except (APIContentTypeError, ContentTypeError):
@@ -84,6 +198,7 @@ class OlarmApi:
                         return {"error": text}
 
                     if "too many requests" in text.lower():
+                        self._rate_limiter.record_rate_limit()
                         LOGGER.error(
                             "Your refresh interval is set too frequent for the Olarm API to handle"
                         )
@@ -109,13 +224,17 @@ class OlarmApi:
             "actionCreated": 0,
             "actionCmd": None,
         }
+
+        if not await self._rate_limiter.wait_for_slot():
+            return return_data
+
         try:
-            await asyncio.sleep(0.5 * self.entry.data[CONF_SCAN_INTERVAL])
             async with aiohttp.ClientSession() as session, session.get(
                 f"https://apiv4.olarm.co/api/v4/devices/{self.device_id}/actions",
                 headers=self.headers,
             ) as response:
                 if response.status == 404:
+                    self._rate_limiter.record_success()
                     LOGGER.warning(
                         "Olarm has no saved history for device (%s)",
                         self.device_name,
@@ -124,8 +243,9 @@ class OlarmApi:
 
                 if response.status == 429:
                     text = await response.text()
+                    self._rate_limiter.record_rate_limit()
                     LOGGER.error(
-                        "Olarm actions endpoint rate limited (429) for device (%s). Reduce scan interval or try again later.\n%s",
+                        "Olarm actions endpoint rate limited (429) for device (%s). Backing off.\n%s",
                         self.device_name,
                         text,
                     )
@@ -138,6 +258,7 @@ class OlarmApi:
                         "actionCreated": 0,
                     }
                     changes = await response.json()
+                    self._rate_limiter.record_success()
                     for change in changes:
                         if (
                             change["actionCmd"]
@@ -523,14 +644,32 @@ class OlarmApi:
 
         params: post_data_data (dict): The area to perform the action to. As well as the action.
         """
+        if not await self._rate_limiter.wait_for_slot():
+            LOGGER.error(
+                "Olarm API: Cannot send action %s — rate limited. Try again later.",
+                post_data,
+            )
+            return False
+
         try:
             async with aiohttp.ClientSession() as session, session.post(
                 url=f"https://apiv4.olarm.co/api/v4/devices/{self.device_id}/actions",
                 data=post_data,
                 headers=self.headers,
             ) as response:
+                if response.status == 429:
+                    text = await response.text()
+                    self._rate_limiter.record_rate_limit()
+                    LOGGER.error(
+                        "Olarm API rate limited (429) sending action to device (%s). Backing off.\n%s",
+                        self.device_name,
+                        text,
+                    )
+                    return False
+
                 try:
                     resp = await response.json()
+                    self._rate_limiter.record_success()
                     if str(resp["actionStatus"]).lower() != "ok":
                         LOGGER.error(
                             "Could not send action: %s to Olarm Device (%s) due to error: %s",
@@ -542,6 +681,8 @@ class OlarmApi:
 
                 except (APIContentTypeError, ContentTypeError):
                     text = await response.text()
+                    if "too many requests" in text.lower():
+                        self._rate_limiter.record_rate_limit()
                     LOGGER.error(
                         "Error Bypassing zone: %s on device (%s).\n\n%s",
                         post_data["actionNum"],
@@ -652,14 +793,27 @@ class OlarmApi:
 
         return: list The devices associated with the api key.
         """
+        if not await self._rate_limiter.wait_for_slot():
+            return []
+
         try:
             async with aiohttp.ClientSession() as session, session.get(
                 "https://apiv4.olarm.co/api/v4/devices",
                 headers=self.headers,
             ) as response:
+                if response.status == 429:
+                    text = await response.text()
+                    self._rate_limiter.record_rate_limit()
+                    LOGGER.error(
+                        "Olarm API rate limited (429) listing devices. Backing off.\n%s",
+                        text,
+                    )
+                    return []
+
                 try:
                     olarm_resp = await response.json()
                     self.devices = olarm_resp["data"]
+                    self._rate_limiter.record_success()
                     return self.devices
 
                 except (APIContentTypeError, ContentTypeError):
@@ -671,6 +825,7 @@ class OlarmApi:
                         return []
 
                     if "Too Many Requests" in text:
+                        self._rate_limiter.record_rate_limit()
                         LOGGER.error(
                             "Your api key has been temporarily blocked due to too many request. Increase your scan interval"
                         )
