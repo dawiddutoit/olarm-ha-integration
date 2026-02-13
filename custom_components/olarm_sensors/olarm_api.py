@@ -257,7 +257,13 @@ class OlarmApi:
                 )
 
             zone = zone + 1
-            for key, value in olarm_state["power"].items():
+            power = olarm_state.get("power", {})
+            if not power and "powerAC" in olarm_state:
+                power = {
+                    "AC": 1 if olarm_state.get("powerAC") == "ok" else 0,
+                    "Batt": 1 if olarm_state.get("powerBattery") == "ok" else 0,
+                }
+            for key, value in power.items():
                 sensortype = 1000
                 if int(value) == 1:
                     state = "on"
@@ -510,7 +516,7 @@ class OlarmApi:
 
     async def get_alarm_trigger(self, devices_json) -> list:
         """Return the data for the zones that triggered an alarm for the area."""
-        return devices_json["deviceState"]["areasDetail"]
+        return devices_json.get("deviceState", {}).get("areasDetail", [])
 
     async def send_action(self, post_data) -> bool:
         """DOCSTRING: Sends an action to the Olarm API to perform an action on the device.

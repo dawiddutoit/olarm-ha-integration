@@ -204,7 +204,8 @@ class OlarmAlarm(CoordinatorEntity, AlarmControlPanelEntity):
     @property
     def last_changed(self) -> str | None:
         """Return the last change triggered by."""
-        return self.coordinator.area_changes[self.area - 1]["actionCreated"]
+        changes = self.coordinator.area_changes[self.area - 1] if self.area - 1 < len(self.coordinator.area_changes) else {}
+        return changes.get("actionCreated")
 
     @property
     def should_poll(self) -> bool:
@@ -214,13 +215,12 @@ class OlarmAlarm(CoordinatorEntity, AlarmControlPanelEntity):
     @property
     def extra_state_attributes(self) -> Mapping[str, Any] | None:
         """Return the state attributes."""
+        changes = self.coordinator.area_changes[self.area - 1] if self.area - 1 < len(self.coordinator.area_changes) else {}
         return {
-            "last_changed": self.coordinator.area_changes[self.area - 1][
-                "actionCreated"
-            ],
-            "changed_by": self.coordinator.area_changes[self.area - 1]["userFullname"],
+            "last_changed": changes.get("actionCreated"),
+            "changed_by": changes.get("userFullname"),
             "area_trigger": self._area_trigger,
-            "last_action": self.coordinator.area_changes[self.area - 1]["actionCmd"],
+            "last_action": changes.get("actionCmd"),
             "code_format": self.code_format,
             "area_name": self.sensor_name,
             "area_number": self.area,
@@ -324,13 +324,13 @@ class OlarmAlarm(CoordinatorEntity, AlarmControlPanelEntity):
             self._state = OLARM_STATE_TO_HA.get(
                 self.coordinator.panel_state[self.area - 1]["state"]
             )
-        except ListIndexError:
+        except (IndexError, ListIndexError):
             LOGGER.error("Could not set alarm panel state for %s", self.sensor_name)
 
         # Setting the area triggers.
         try:
             self._area_trigger = self.coordinator.area_triggers[self.area - 1]
-        except ListIndexError:
+        except (IndexError, ListIndexError):
             LOGGER.error("Could not set area triggers for %s", self.sensor_name)
 
     async def async_alarm_trigger(self, code: str | None = None) -> None:
@@ -364,13 +364,13 @@ class OlarmAlarm(CoordinatorEntity, AlarmControlPanelEntity):
             self._state = OLARM_STATE_TO_HA.get(
                 self.coordinator.panel_state[self.area - 1]["state"]
             )
-        except ListIndexError:
+        except (IndexError, ListIndexError):
             LOGGER.error("Could not set alarm panel state for %s", self.sensor_name)
 
         # Setting the area triggers.
         try:
             self._area_trigger = self.coordinator.area_triggers[self.area - 1]
-        except ListIndexError:
+        except (IndexError, ListIndexError):
             LOGGER.error("Could not set area triggers for %s", self.sensor_name)
 
         super()._handle_coordinator_update()

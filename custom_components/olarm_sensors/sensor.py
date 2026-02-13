@@ -71,6 +71,7 @@ class OlarmTriggerSensor(SensorEntity):
         self.coordinator: OlarmCoordinator = self.hass.data[DOMAIN][
             self.coordinator.olarm_device_id
         ]
+        area_triggers = ""
         try:
             area_triggers = self.coordinator.area_triggers[self.area]
             if area_triggers and area_triggers != "":
